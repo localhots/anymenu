@@ -30,7 +30,9 @@ func Main() {
 	if err != nil {
 		log.Fatalf("Failed to read config file: %v", err)
 	}
-	keepConditionsEvaluated(items)
+	for i := range items {
+		items[i].prepare()
+	}
 
 	log.Println("Loading font")
 	if err := ttf.Init(); err != nil {
@@ -96,6 +98,7 @@ func (w *window) eventLoop(r *sdl.Renderer) {
 		}
 		// Ta-dah!
 		r.Present()
+		// pretty.Println(w)
 	}
 }
 
@@ -116,8 +119,14 @@ func (w *window) handleKeyEvent(e *sdl.KeyboardEvent) error {
 
 			w.curItems[i].active = (e.State == sdl.PRESSED)
 			if e.State == sdl.RELEASED {
-				if itm.Condition == nil || !itm.Condition.busy {
-					go w.curItems[i].call()
+				// pretty.Println("triggered", itm)
+				itm.trigger()
+				for _, inv := range itm.Invalidates {
+					for _, itm := range w.curItems {
+						if itm.ID == inv {
+							itm.prepare()
+						}
+					}
 				}
 			}
 		}
@@ -126,22 +135,13 @@ func (w *window) handleKeyEvent(e *sdl.KeyboardEvent) error {
 	return nil
 }
 
-func getItems(path string) ([]listItem, error) {
+func getItems(path string) ([]menuItem, error) {
 	b, err := ioutil.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 
-	var items []listItem
+	var items []menuItem
 	err = json.Unmarshal(b, &items)
 	return items, err
-}
-
-func keepConditionsEvaluated(items []listItem) {
-	for _, item := range items {
-		if item.Condition != nil {
-			go item.Condition.evaluate()
-		}
-		keepConditionsEvaluated(item.Items)
-	}
 }

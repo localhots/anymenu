@@ -1,83 +1,127 @@
 package menu
 
 import (
-	"log"
 	"strings"
-	"time"
 
 	"github.com/juju/errors"
 	"github.com/veandco/go-sdl2/sdl"
 )
 
-type listItem struct {
-	Label     string       `json:"label"`
-	ActionKey string       `json:"key"`
-	Keep      bool         `json:"keep"`
-	Command   string       `json:"command"`
-	Condition *ifCondition `json:"if"`
-	Items     []listItem   `json:"items"`
+type menuItem struct {
+	ID            string     `json:"id"`
+	Label         *string    `json:"label"`
+	LabelCommand  *command   `json:"label_cmd"`
+	ActionKey     string     `json:"key"`
+	ActionCommand *command   `json:"action_cmd"`
+	Toggle        *toggle    `json:"switch"`
+	Items         []menuItem `json:"items"`
+	Invalidates   []string   `json:"invalidates"`
 
 	active bool
-
-	subLabel string
 }
 
-type ifCondition struct {
-	Command string              `json:"command"`
-	Output  map[string]listItem `json:"output"`
-
-	cachedOutput *string
-	busy         bool
-}
-
-func (li *listItem) render(r *sdl.Renderer, offsetY int32) error {
-	if err := drawItemBackground(r, offsetY, li.active); err != nil {
-		return errors.Annotate(err, "draw item background")
+func (mi *menuItem) prepare() {
+	if mi.LabelCommand != nil {
+		mi.LabelCommand.keepUpdated()
 	}
-	if err := drawItemLabel(r, offsetY, *li); err != nil {
+	if mi.Toggle != nil {
+		mi.Toggle.StateCommand.keepUpdated()
+	}
+	for i := range mi.Items {
+		mi.Items[i].prepare()
+	}
+}
+
+func (mi *menuItem) trigger() {
+	if mi.ActionCommand != nil && !mi.ActionCommand.busy {
+		mi.ActionCommand.exec()
+	}
+	if mi.Toggle != nil {
+		mi.Toggle.trigger()
+	}
+}
+
+func (mi *menuItem) label() string {
+	if cmd := mi.LabelCommand; cmd != nil {
+		// pretty.Println(cmd)
+		if cmd.error != nil {
+			return cmd.error.Error()
+		}
+		if cmd.out != nil {
+			return *cmd.out
+		}
+	}
+	if cmd := mi.ActionCommand; cmd != nil {
+		if cmd.error != nil {
+			return cmd.error.Error()
+		}
+	}
+	if mi.Toggle != nil {
+		return mi.Toggle.label()
+	}
+	if mi.Label != nil {
+		return *mi.Label
+	}
+	return "No name"
+}
+
+func (mi *menuItem) busy() bool {
+	if mi.LabelCommand != nil && mi.LabelCommand.busy {
+		return true
+	}
+	if mi.ActionCommand != nil && mi.ActionCommand.busy {
+		return true
+	}
+	if mi.Toggle != nil && mi.Toggle.StateCommand.busy {
+		return true
+	}
+	return false
+}
+
+func (mi *menuItem) render(r *sdl.Renderer, offsetY int32) error {
+	if mi.ActionKey != "" {
+		if err := drawItemBackground(r, offsetY, mi.active); err != nil {
+			return errors.Annotate(err, "draw item background")
+		}
+	}
+	if err := drawItemLabel(r, offsetY, *mi); err != nil {
 		return errors.Annotate(err, "draw item label")
 	}
-	if err := drawActionKeyLabel(r, offsetY, *li); err != nil {
+	if err := drawActionKeyLabel(r, offsetY, *mi); err != nil {
 		return errors.Annotate(err, "draw item label")
 	}
 
 	return nil
 }
 
-func (li *listItem) call() error {
-	defer func() {
-		if err := recover(); err != nil {
-			log.Printf("Action failed: %v", err)
-		}
-	}()
-
-	switch {
-	case li.Condition != nil:
-		if li.Condition.cachedOutput == nil {
-			return nil
-		}
-
-		out := *li.Condition.cachedOutput
-		if match, ok := li.Condition.Output[out]; ok {
-			_, err := execCommand(match.Command)
-			return err
-		}
-
-		log.Println("no match", out)
-		return nil
-	case li.Command != "":
-		_, err := execCommand(li.Command)
-		return err
-	default:
-		return nil
-	}
+type toggle struct {
+	StateCommand command             `json:"state_cmd"`
+	States       map[string]menuItem `json:"states"`
 }
 
-func (li *listItem) label() string {
-	if li.subLabel != "" {
-		return li.Label + " " + li.subLabel
+func (t *toggle) label() string {
+	if t.StateCommand.error != nil {
+		return t.StateCommand.error.Error()
 	}
-	return li.Label
+	if t.StateCommand.out != nil {
+		if opt, ok := t.States[*t.StateCommand.out]; ok {
+			return opt.label()
+		}
+	}
+	return "No name"
+}
+
+func (t *toggle) trigger() {
+	if t.StateCommand.busy {
+		return
+	}
+
+	if t.StateCommand.out != nil {
+		if opt, ok := t.States[*t.StateCommand.out]; ok {
+			opt.trigger()
+			t.StateCommand.resetTimer()
+		}
+	}
 }
 
 func drawItemBackground(r *sdl.Renderer, offsetY int32, active bool) error {
@@ -120,22 +164,15 @@ func drawItemBackground(r *sdl.Renderer, offsetY int32, active bool) error {
 	return nil
 }
 
-func drawItemLabel(r *sdl.Renderer, offsetY int32, li listItem) error {
-	label := li.Label
-	if li.Condition != nil {
-		if li.Condition.cachedOutput != nil {
-			out := *li.Condition.cachedOutput
-			if match, ok := li.Condition.Output[out]; ok {
-				label = match.Label
-			}
-		}
-		if li.Condition.busy {
-			label += " [busy]"
-		}
-	}
+func drawItemLabel(r *sdl.Renderer, offsetY int32, mi menuItem) error {
+	label := mi.label()
 	color := theme.ItemText
-	if li.Condition != nil && li.Condition.busy {
+	if mi.busy() && mi.ActionKey != "" {
+		label += " [busy]"
 		color = theme.TextBusy
+	}
+	if label == "" {
+		return nil
 	}
 
 	labelTexture, err := renderText(r, label, color)
@@ -161,11 +198,14 @@ func drawItemLabel(r *sdl.Renderer, offsetY int32, li listItem) error {
 	return nil
 }
 
-func drawActionKeyLabel(r *sdl.Renderer, offsetY int32, li listItem) error {
-	label := strings.ToUpper(li.ActionKey)
+func drawActionKeyLabel(r *sdl.Renderer, offsetY int32, mi menuItem) error {
+	label := strings.ToUpper(mi.ActionKey)
 	color := theme.ItemText
-	if li.Condition != nil && li.Condition.busy {
+	if mi.busy() && mi.ActionKey != "" {
 		color = theme.TextBusy
+	}
+	if label == "" {
+		return nil
 	}
 
 	labelTexture, err := renderText(r, label, color)
@@ -203,25 +243,4 @@ func renderText(r *sdl.Renderer, text string, c sdl.Color) (t *sdl.Texture, err 
 	}
 
 	return
-}
-
-func (c *ifCondition) evaluate() {
-	fn := func() {
-		c.busy = true
-		out, err := execCommand(c.Command)
-		if err != nil {
-			log.Printf("Error evaluating condition: %v", err)
-		} else {
-			out = strings.TrimSpace(out)
-			c.cachedOutput = &out
-		}
-		c.busy = false
-	}
-	fn()
-
-	t := time.NewTicker(2 * time.Second)
-	defer t.Stop()
-	for range t.C {
-		fn()
-	}
 }

@@ -15,7 +15,7 @@ const (
 var (
 	windowWidth  = 600
 	windowHeight = 800
-	borderWidth  = 1
+	borderWidth  = 0
 
 	fontName = "InconsolataGo Regular"
 	fontSize = 24
@@ -24,7 +24,7 @@ var (
 
 type window struct {
 	window             *sdl.Window
-	allItems, curItems []listItem
+	allItems, curItems []menuItem
 }
 
 func (w window) render(r *sdl.Renderer) error {
